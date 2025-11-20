@@ -16,11 +16,8 @@ export default defineConfig(({ mode }) => {
       minify: 'esbuild',
     },
     define: {
-      // Defines process.env as a global object in the browser environment.
-      // We stringify the object to ensure the values are embedded as strings.
-      'process.env': JSON.stringify({
-        API_KEY: apiKey
-      })
+      // Safely replace ONLY the API_KEY access, preserving other process.env properties like NODE_ENV
+      'process.env.API_KEY': JSON.stringify(apiKey)
     }
   };
 });

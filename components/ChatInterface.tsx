@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Image as ImageIcon, X, Trash2, Bot, User, Loader2, Sparkles, FileText, Mic, StopCircle, RefreshCw, Copy, Check, ChevronDown, Terminal, Lightbulb, Code2, Plane, BookOpen, History, MessageSquare, Plus, Pencil, Menu, BrainCircuit, Zap } from 'lucide-react';
+import { Send, Image as ImageIcon, X, Trash2, Bot, User, Loader2, Sparkles, FileText, Mic, StopCircle, RefreshCw, Copy, Check, ChevronDown, Terminal, Lightbulb, Code2, Plane, BookOpen, History, MessageSquare, Plus, Pencil, Menu, BrainCircuit, Zap, Palette, Download } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { streamChatResponse, fileToBase64 } from '../services/geminiService';
+import { streamChatResponse, fileToBase64, generateImageFromPrompt } from '../services/geminiService';
 import { Message, BotModel, ChatConfig, ChatSession } from '../types';
 
 const DEFAULT_SYSTEM_INSTRUCTION = "You are a helpful, clever, and friendly AI assistant named Gemini.";
@@ -262,6 +262,7 @@ export const ChatInterface: React.FC = () => {
     setSelectedTextFile(null);
   };
 
+  // --- Text/Chat Logic ---
   const processMessage = async (text: string, image: string | null | undefined, history: Message[]) => {
     const aiMessageId = (Date.now() + 1).toString();
     const aiPlaceholder: Message = {
@@ -338,6 +339,54 @@ export const ChatInterface: React.FC = () => {
     }
   };
 
+  // --- Image Generation Logic ---
+  const handleGenerateImage = async () => {
+    if (!inputValue.trim() || isStreaming) return;
+    const prompt = inputValue.trim();
+    setInputValue("");
+    
+    // Add user message
+    const userMsgId = Date.now().toString();
+    const userMsg: Message = {
+       id: userMsgId,
+       role: 'user',
+       text: `Generate image: ${prompt}`,
+       timestamp: Date.now()
+    };
+    setMessages(prev => [...prev, userMsg]);
+
+    // Add bot placeholder
+    const botMsgId = (Date.now() + 1).toString();
+    const botMsg: Message = {
+      id: botMsgId,
+      role: 'model',
+      text: "Generating image...",
+      isStreaming: true,
+      timestamp: Date.now()
+    };
+    setMessages(prev => [...prev, botMsg]);
+    setIsStreaming(true);
+    
+    if (textareaRef.current) textareaRef.current.style.height = 'inherit';
+
+    try {
+       const base64Image = await generateImageFromPrompt(prompt);
+       setMessages(prev => prev.map(m => 
+         m.id === botMsgId 
+         ? { ...m, text: `Generated image for: "${prompt}"`, image: base64Image, isStreaming: false }
+         : m
+       ));
+    } catch (err: any) {
+       setMessages(prev => prev.map(m => 
+         m.id === botMsgId 
+         ? { ...m, text: `Error generating image: ${err.message}`, isError: true, isStreaming: false }
+         : m
+       ));
+    } finally {
+      setIsStreaming(false);
+    }
+  };
+
   const handleSendMessage = async (overrideText?: string) => {
     const textToSend = overrideText !== undefined ? overrideText : inputValue;
     
@@ -384,11 +433,41 @@ export const ChatInterface: React.FC = () => {
     const lastUserMessage = newHistory[newHistory.length - 1];
     if (!lastUserMessage || lastUserMessage.role !== 'user') return;
 
-    // Need to re-construct context. Ideally we re-send the previous user message text
-    // But processMessage takes (text, image, history).
-    // history should be everything BEFORE the last user message.
+    // If the last user message was an image generation request
+    if (lastUserMessage.text.startsWith("Generate image:")) {
+        const prompt = lastUserMessage.text.replace("Generate image:", "").trim();
+        // Add placeholder and trigger generation (manual reconstruction of handleGenerateImage logic)
+         const botMsgId = (Date.now() + 1).toString();
+         const botMsg: Message = {
+            id: botMsgId,
+            role: 'model',
+            text: "Generating image...",
+            isStreaming: true,
+            timestamp: Date.now()
+        };
+        setMessages(prev => [...prev, botMsg]);
+        setIsStreaming(true);
+        try {
+            const base64Image = await generateImageFromPrompt(prompt);
+            setMessages(prev => prev.map(m => 
+                m.id === botMsgId 
+                ? { ...m, text: `Generated image for: "${prompt}"`, image: base64Image, isStreaming: false }
+                : m
+            ));
+        } catch (err: any) {
+            setMessages(prev => prev.map(m => 
+                m.id === botMsgId 
+                ? { ...m, text: `Error: ${err.message}`, isError: true, isStreaming: false }
+                : m
+            ));
+        } finally {
+            setIsStreaming(false);
+        }
+        return;
+    }
+
+    // Normal chat regenerate
     const historyForContext = newHistory.slice(0, -1);
-    
     await processMessage(lastUserMessage.text, lastUserMessage.image, historyForContext);
   };
 
@@ -397,7 +476,12 @@ export const ChatInterface: React.FC = () => {
     const msgToEdit = messages[index];
     if (msgToEdit.role !== 'user') return;
 
-    setInputValue(msgToEdit.text); // Populate input
+    // If it was an image generation request, strip the prefix
+    const textToEdit = msgToEdit.text.startsWith("Generate image:") 
+        ? msgToEdit.text.replace("Generate image:", "").trim()
+        : msgToEdit.text;
+
+    setInputValue(textToEdit); // Populate input
     // Remove this message and everything after it
     setMessages(prev => prev.slice(0, index));
     if (textareaRef.current) textareaRef.current.focus();
@@ -405,6 +489,15 @@ export const ChatInterface: React.FC = () => {
 
   const handleCopyMessage = (text: string) => {
     navigator.clipboard.writeText(text);
+  };
+
+  const handleDownloadImage = (base64: string, fileName: string) => {
+    const link = document.createElement('a');
+    link.href = `data:image/jpeg;base64,${base64}`;
+    link.download = `${fileName}.jpg`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -416,10 +509,34 @@ export const ChatInterface: React.FC = () => {
 
   const suggestions = [
     { icon: <Code2 className="w-4 h-4" />, label: "Write a Python script to parse JSON" },
-    { icon: <Lightbulb className="w-4 h-4" />, label: "Explain Quantum Computing" },
+    { icon: <Palette className="w-4 h-4" />, label: "Generate image: A futuristic city at night" },
     { icon: <BookOpen className="w-4 h-4" />, label: "Summarize 'The Alchemist'" },
     { icon: <Plane className="w-4 h-4" />, label: "Itinerary for 3 days in Paris" },
   ];
+
+  // Helper wrapper to route click to correct handler
+  const handleSuggestionClick = (label: string) => {
+    if (label.startsWith("Generate image:")) {
+        const prompt = label.replace("Generate image:", "").trim();
+        setInputValue(prompt);
+        // We need a slight delay to let state update or just call logic directly
+        // Since state update is async, we can't reuse handleGenerateImage directly with 'inputValue' immediately.
+        // So we update input for visual, but would need to trigger logic manually. 
+        // Simplest: Set input, let user click button? No, user expects action.
+        // Hack: Reuse handleGenerateImage logic but pass prompt arg? handleGenerateImage uses state.
+        // Let's just simulate setting input and triggering after short timeout, or better, refactor handleGenerateImage to accept optional prompt.
+        // BUT handleGenerateImage reads from inputValue state.
+        // Fixed: I'll just set the input value. The user can then click the Palette button. 
+        // OR better: check if label starts with "Generate image:" inside handleSendMessage? 
+        // No, "Generate Image" is a distinct API call.
+        // I will set the input value to the prompt and let user verify, OR execute it.
+        // Let's execute it by modifying handleGenerateImage to take an arg.
+        // Since I can't easily change signature without refactoring, I'll just setInputValue for now.
+        setInputValue(prompt);
+    } else {
+        handleSendMessage(label);
+    }
+  };
 
   return (
     <div className="flex h-screen w-full bg-slate-950 text-slate-100 overflow-hidden relative">
@@ -593,7 +710,7 @@ export const ChatInterface: React.FC = () => {
                         {suggestions.map((s, i) => (
                             <button 
                                 key={i}
-                                onClick={() => handleSendMessage(s.label)}
+                                onClick={() => handleSuggestionClick(s.label)}
                                 className="flex items-center gap-3 p-4 bg-slate-900/50 hover:bg-slate-800 border border-slate-800 hover:border-indigo-500/50 rounded-xl text-left text-sm text-slate-300 hover:text-white transition-all hover:-translate-y-0.5 group"
                             >
                                 <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-400 group-hover:bg-indigo-500 group-hover:text-white transition-colors">
@@ -618,13 +735,31 @@ export const ChatInterface: React.FC = () => {
                             </div>
 
                             <div className={`flex flex-col gap-2 max-w-[90%] lg:max-w-[85%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                                {/* Display User Image if attached */}
-                                {msg.image && (
+                                {/* Display User Image if uploaded */}
+                                {msg.image && msg.role === 'user' && (
                                     <img 
                                         src={`data:image/jpeg;base64,${msg.image}`} 
                                         alt="Uploaded content" 
                                         className="rounded-xl border border-slate-700/50 shadow-lg max-w-xs w-full object-cover"
                                     />
+                                )}
+
+                                {/* Display Generated Image if from model */}
+                                {msg.image && msg.role === 'model' && (
+                                    <div className="relative group/image">
+                                        <img 
+                                            src={`data:image/jpeg;base64,${msg.image}`} 
+                                            alt="Generated content" 
+                                            className="rounded-xl border border-slate-700/50 shadow-lg max-w-sm w-full object-cover"
+                                        />
+                                        <button 
+                                            onClick={() => handleDownloadImage(msg.image!, `gemini-image-${msg.id}`)}
+                                            className="absolute bottom-2 right-2 p-2 bg-slate-900/80 hover:bg-indigo-600 text-white rounded-lg backdrop-blur-sm opacity-0 group-hover/image:opacity-100 transition-all"
+                                            title="Download Image"
+                                        >
+                                            <Download className="w-4 h-4" />
+                                        </button>
+                                    </div>
                                 )}
                                 
                                 {(msg.text || msg.isStreaming) && (
@@ -781,10 +916,24 @@ export const ChatInterface: React.FC = () => {
                         value={inputValue}
                         onChange={(e) => setInputValue(e.target.value)}
                         onKeyDown={handleKeyDown}
-                        placeholder="Ask anything..."
+                        placeholder="Ask anything or describe an image to generate..."
                         className="flex-1 bg-transparent text-white placeholder:text-slate-500 text-sm py-3 focus:outline-none max-h-[200px] resize-none"
                         rows={1}
                     />
+                    
+                    {/* New Generate Image Button */}
+                    <button
+                        onClick={handleGenerateImage}
+                        disabled={!inputValue.trim() || isStreaming}
+                        className={`p-3 rounded-xl transition-all ${
+                            !inputValue.trim() || isStreaming
+                            ? 'text-slate-600 cursor-not-allowed'
+                            : 'text-pink-400 hover:text-pink-300 hover:bg-pink-500/10'
+                        }`}
+                        title="Generate Image from text"
+                    >
+                        <Palette className="w-5 h-5" />
+                    </button>
                     
                     <button
                         onClick={toggleListening}
